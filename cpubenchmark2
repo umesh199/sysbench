@@ -1,0 +1,59 @@
+import pandas as pd
+import ansible_runner
+import re
+
+# Define inventory file path
+INVENTORY_FILE = "inventory.ini"
+
+# Run Ansible playbook to execute sysbench CPU test
+playbook = {
+    "name": "Run Sysbench CPU Benchmark",
+    "hosts": "all",
+    "gather_facts": "yes",
+    "tasks": [
+        {"name": "Run sysbench CPU benchmark",
+         "shell": "sysbench cpu --threads=$(nproc) --time=1800 run",
+         "register": "cpu_benchmark"},
+        {"name": "Collect CPU details",
+         "shell": "lscpu | grep '^CPU(s)'",
+         "register": "cpu_cores"},
+        {"name": "Collect hostname",
+         "shell": "hostname",
+         "register": "hostname"},
+        {"name": "Save output",
+         "debug": {"msg": "{{ cpu_benchmark.stdout }}"}}
+    ]
+}
+
+# Run the playbook
+runner = ansible_runner.run(private_data_dir='.', inventory=INVENTORY_FILE, playbook=playbook)
+
+# Parse Ansible results
+data = []
+for event in runner.events:
+    if 'event_data' in event and 'res' in event['event_data']:
+        res = event['event_data']['res']
+        hostname = res.get('hostname', 'Unknown')
+        cpu_cores = res.get('cpu_cores', '0')
+        sysbench_output = res.get('cpu_benchmark', '')
+        
+        # Extract events per second and execution time from sysbench output
+        events_per_sec = re.search(r'events per second:\s+([\d\.]+)', sysbench_output)
+        execution_time = re.search(r'total time:\s+([\d\.]+)s', sysbench_output)
+        
+        data.append([
+            hostname,
+            int(cpu_cores.split(':')[-1].strip()) if cpu_cores else 0,
+            float(events_per_sec.group(1)) if events_per_sec else 0.0,
+            float(execution_time.group(1)) if execution_time else 0.0
+        ])
+
+# Create DataFrame and rank servers
+columns = ["Hostname", "CPU Cores", "Events Per Second", "Execution Time (s)"]
+df = pd.DataFrame(data, columns=columns)
+df.sort_values(by="Events Per Second", ascending=False, inplace=True)
+
+# Save to Excel
+excel_filename = "cpu_benchmark_results.xlsx"
+df.to_excel(excel_filename, index=False)
+print(f"Results saved to {excel_filename}")
