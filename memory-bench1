@@ -1,0 +1,108 @@
+import os
+import re
+import pandas as pd
+import subprocess
+
+# Constants
+INVENTORY_FILE = "inventory.txt"
+ANSIBLE_INVENTORY = "inventory.ini"
+PLAYBOOK_FILE = "sysbench_memory.yml"
+RESULTS_DIR = "./results/"
+EXCEL_FILE = "sysbench_memory_results.xlsx"
+
+# Step 1: Read inventory file and create Ansible inventory
+with open(INVENTORY_FILE, "r") as f:
+    hosts = [line.strip() for line in f if line.strip()]
+
+with open(ANSIBLE_INVENTORY, "w") as f:
+    f.write("[servers]\n")
+    for host in hosts:
+        f.write(f"{host}\n")
+
+# Step 2: Create Ansible playbook for Memory benchmark
+ansible_playbook_content = """
+- name: Run sysbench Memory benchmark
+  hosts: servers
+  gather_facts: yes
+  tasks:
+    - name: Install sysbench (if not installed)
+      package:
+        name: sysbench
+        state: present
+      become: yes
+
+    - name: Collect system memory and CPU cores
+      shell: |
+        echo "$(free -m | awk '/Mem:/ {print $2}') $(nproc)"
+      register: system_info
+
+    - name: Parse system memory and CPU cores
+      set_fact:
+        total_memory: "{{ system_info.stdout.split(' ')[0] }}"
+        num_cores: "{{ system_info.stdout.split(' ')[1] }}"
+
+    - name: Run sysbench Memory Read benchmark
+      shell: sysbench memory --memory-block-size=4K --memory-total-size={{ total_memory }}M --memory-oper=read --threads={{ num_cores }} --time=1800 run
+      register: memory_read
+
+    - name: Run sysbench Memory Write benchmark
+      shell: sysbench memory --memory-block-size=4K --memory-total-size={{ total_memory }}M --memory-oper=write --threads={{ num_cores }} --time=1800 run
+      register: memory_write
+
+    - name: Save sysbench results
+      copy:
+        content: |
+          Memory Size: {{ total_memory }} MB
+          CPU Cores: {{ num_cores }}
+          Read Test:
+          {{ memory_read.stdout }}
+          Write Test:
+          {{ memory_write.stdout }}
+        dest: "/tmp/sysbench_memory_{{ inventory_hostname }}.log"
+
+    - name: Fetch sysbench output from remote nodes
+      fetch:
+        src: "/tmp/sysbench_memory_{{ inventory_hostname }}.log"
+        dest: "./results/"
+        flat: yes
+"""
+
+with open(PLAYBOOK_FILE, "w") as f:
+    f.write(ansible_playbook_content)
+
+# Step 3: Run Ansible Playbook
+print("Running Ansible playbook...")
+subprocess.run(["ansible-playbook", "-i", ANSIBLE_INVENTORY, PLAYBOOK_FILE], check=True)
+
+# Step 4: Parse sysbench output and extract performance data
+data = []
+
+for file in os.listdir(RESULTS_DIR):
+    if file.endswith(".log"):
+        hostname = file.replace("sysbench_memory_", "").replace(".log", "")
+
+        with open(os.path.join(RESULTS_DIR, file), "r") as f:
+            content = f.read()
+
+            # Extract sysbench statistics
+            memory_mb_match = re.search(r"Memory Size:\s*(\d+)", content)
+            cores_match = re.search(r"CPU Cores:\s*(\d+)", content)
+            read_events_match = re.search(r"total number of events:\s*(\d+)", content)
+            read_events_per_sec_match = re.search(r"events per second:\s*([\d\.]+)", content)
+            write_events_match = re.search(r"total number of events:\s*(\d+)", content)
+            write_events_per_sec_match = re.search(r"events per second:\s*([\d\.]+)", content)
+
+            memory_mb = memory_mb_match.group(1) if memory_mb_match else "N/A"
+            cores = cores_match.group(1) if cores_match else "N/A"
+            read_total_events = read_events_match.group(1) if read_events_match else "N/A"
+            read_events_per_sec = read_events_per_sec_match.group(1) if read_events_per_sec_match else "N/A"
+            write_total_events = write_events_match.group(1) if write_events_match else "N/A"
+            write_events_per_sec = write_events_per_sec_match.group(1) if write_events_per_sec_match else "N/A"
+
+            data.append([hostname, memory_mb, cores, read_total_events, read_events_per_sec, write_total_events, write_events_per_sec])
+
+# Step 5: Save results to Excel
+df = pd.DataFrame(data, columns=["Hostname", "Memory (MB)", "CPU Cores", "Read Total Events", "Read Events/sec", "Write Total Events", "Write Events/sec"])
+df.to_excel(EXCEL_FILE, index=False)
+
+print(f"✅ Results saved to {EXCEL_FILE}")
