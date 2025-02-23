@@ -1,0 +1,85 @@
+import os
+import re
+import pandas as pd
+import subprocess
+
+# Constants
+INVENTORY_FILE = "inventory.txt"
+ANSIBLE_INVENTORY = "inventory.ini"
+PLAYBOOK_FILE = "sysbench_memory.yml"
+RESULTS_DIR = "./results/"
+EXCEL_FILE = "sysbench_memory_results.xlsx"
+
+# Step 1: Read inventory file and create Ansible inventory
+with open(INVENTORY_FILE, "r") as f:
+    hosts = [line.strip() for line in f if line.strip()]
+
+with open(ANSIBLE_INVENTORY, "w") as f:
+    f.write("[servers]\n")
+    for host in hosts:
+        f.write(f"{host}\n")
+
+# Step 2: Create Ansible playbook
+ansible_playbook_content = """\
+- name: Run sysbench memory benchmark
+  hosts: servers
+  gather_facts: yes
+  tasks:
+    - name: Install sysbench (if not installed)
+      package:
+        name: sysbench
+        state: present
+      become: yes
+
+    - name: Run sysbench memory benchmark
+      shell: |
+        sysbench memory --memory-block-size=1M --threads={{ ansible_processor_vcpus }} --time=1800 run
+      register: sysbench_output
+
+    - name: Save sysbench results
+      copy:
+        content: "{{ sysbench_output.stdout }}"
+        dest: "/tmp/sysbench_memory_{{ inventory_hostname }}.log"
+
+    - name: Fetch sysbench output from remote nodes
+      fetch:
+        src: "/tmp/sysbench_memory_{{ inventory_hostname }}.log"
+        dest: "./results/"
+        flat: yes
+"""
+
+with open(PLAYBOOK_FILE, "w") as f:
+    f.write(ansible_playbook_content)
+
+# Step 3: Run Ansible Playbook
+print("Running Ansible playbook...")
+subprocess.run(["ansible-playbook", "-i", ANSIBLE_INVENTORY, PLAYBOOK_FILE], check=True)
+
+# Step 4: Parse sysbench output and extract performance data
+data = []
+
+for file in os.listdir(RESULTS_DIR):
+    if file.endswith(".log"):
+        hostname = file.replace("sysbench_memory_", "").replace(".log", "")
+
+        with open(os.path.join(RESULTS_DIR, file), "r") as f:
+            content = f.read()
+
+            # Extract sysbench statistics
+            cores_match = re.search(r"threads:\s*(\d+)", content)
+            throughput_match = re.search(r"transferred\s*\((.*?)\):\s*(\d+\.\d+)\s*MiB/sec", content)
+            total_operations_match = re.search(r"total number of events:\s*(\d+)", content)
+            avg_latency_match = re.search(r"avg:\s*(\d+\.\d+)\sms", content)
+
+            cores = cores_match.group(1) if cores_match else "N/A"
+            throughput = throughput_match.group(2) if throughput_match else "N/A"
+            total_operations = total_operations_match.group(1) if total_operations_match else "N/A"
+            avg_latency = avg_latency_match.group(1) if avg_latency_match else "N/A"
+
+            data.append([hostname, cores, throughput, total_operations, avg_latency])
+
+# Step 5: Save results to Excel
+df = pd.DataFrame(data, columns=["Hostname", "Cores", "Throughput (MiB/s)", "Total Operations", "Avg Latency (ms)"])
+df.to_excel(EXCEL_FILE, index=False)
+
+print(f"Results saved to {EXCEL_FILE}")
