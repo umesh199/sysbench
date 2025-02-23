@@ -1,0 +1,85 @@
+import os
+import re
+import pandas as pd
+import subprocess
+
+# Constants
+INVENTORY_FILE = "inventory.txt"
+ANSIBLE_INVENTORY = "inventory.ini"
+PLAYBOOK_FILE = "sysbench_cpu.yml"
+RESULTS_DIR = "./results/"
+EXCEL_FILE = "sysbench_cpu_results.xlsx"
+
+# Step 1: Read inventory file and create Ansible inventory
+with open(INVENTORY_FILE, "r") as f:
+    hosts = [line.strip() for line in f if line.strip()]
+
+with open(ANSIBLE_INVENTORY, "w") as f:
+    f.write("[servers]\n")
+    for host in hosts:
+        f.write(f"{host}\n")
+
+# Step 2: Create Ansible playbook for CPU benchmark
+ansible_playbook_content = """\
+- name: Run sysbench CPU benchmark
+  hosts: servers
+  gather_facts: yes
+  tasks:
+    - name: Install sysbench (if not installed)
+      package:
+        name: sysbench
+        state: present
+      become: yes
+
+    - name: Run sysbench CPU benchmark
+      shell: |
+        sysbench cpu --cpu-max-prime=20000 --threads={{ ansible_processor_vcpus }} --time=1800 run
+      register: sysbench_output
+
+    - name: Save sysbench results
+      copy:
+        content: "{{ sysbench_output.stdout }}"
+        dest: "/tmp/sysbench_cpu_{{ inventory_hostname }}.log"
+
+    - name: Fetch sysbench output from remote nodes
+      fetch:
+        src: "/tmp/sysbench_cpu_{{ inventory_hostname }}.log"
+        dest: "./results/"
+        flat: yes
+"""
+
+with open(PLAYBOOK_FILE, "w") as f:
+    f.write(ansible_playbook_content)
+
+# Step 3: Run Ansible Playbook
+print("Running Ansible playbook...")
+subprocess.run(["ansible-playbook", "-i", ANSIBLE_INVENTORY, PLAYBOOK_FILE], check=True)
+
+# Step 4: Parse sysbench output and extract performance data
+data = []
+
+for file in os.listdir(RESULTS_DIR):
+    if file.endswith(".log"):
+        hostname = file.replace("sysbench_cpu_", "").replace(".log", "")
+
+        with open(os.path.join(RESULTS_DIR, file), "r") as f:
+            content = f.read()
+
+            # Extract sysbench statistics
+            cores_match = re.search(r"threads:\s*(\d+)", content)
+            total_events_match = re.search(r"total number of events:\s*(\d+)", content)
+            events_per_second_match = re.search(r"events per second:\s*(\d+\.\d+)", content)
+            execution_time_match = re.search(r"total time:\s*(\d+\.\d+)", content)
+
+            cores = cores_match.group(1) if cores_match else "N/A"
+            total_events = total_events_match.group(1) if total_events_match else "N/A"
+            events_per_second = events_per_second_match.group(1) if events_per_second_match else "N/A"
+            execution_time = execution_time_match.group(1) if execution_time_match else "N/A"
+
+            data.append([hostname, cores, total_events, events_per_second, execution_time])
+
+# Step 5: Save results to Excel
+df = pd.DataFrame(data, columns=["Hostname", "Cores", "Total Events", "Events/sec", "Execution Time (s)"])
+df.to_excel(EXCEL_FILE, index=False)
+
+print(f"Results saved to {EXCEL_FILE}")
