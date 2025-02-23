@@ -1,0 +1,102 @@
+import json
+import pandas as pd
+import subprocess
+
+# Define the Ansible playbook content
+ANSIBLE_PLAYBOOK = """---
+- name: Run Memory Read/Write Benchmark on Multiple Servers
+  hosts: all
+  gather_facts: yes
+  tasks:
+    - name: Install sysbench (if not installed)
+      package:
+        name: sysbench
+        state: present
+
+    - name: Calculate Memory Allocation (5x system memory, max 2T)
+      shell: |
+        mem_size=$(free -g | awk '/Mem:/ {print $2}')
+        echo "$((mem_size * 5))G"
+      register: memory_alloc
+
+    - name: Run Memory Read Benchmark (30 min)
+      shell: |
+        sysbench memory --memory-block-size=4K \
+        --memory-total-size={{ memory_alloc.stdout }} \
+        --memory-oper=read --time=1800 --threads={{ ansible_processor_vcpus }} run | tee /tmp/sysbench_memory_read.log
+      register: sysbench_read_output
+
+    - name: Run Memory Write Benchmark (30 min)
+      shell: |
+        sysbench memory --memory-block-size=4K \
+        --memory-total-size={{ memory_alloc.stdout }} \
+        --memory-oper=write --time=1800 --threads={{ ansible_processor_vcpus }} run | tee /tmp/sysbench_memory_write.log
+      register: sysbench_write_output
+
+    - name: Extract Read Total Events
+      shell: grep "total number of events" /tmp/sysbench_memory_read.log | awk '{print $5}'
+      register: read_total_events
+
+    - name: Extract Read Events per Second
+      shell: grep "events per second" /tmp/sysbench_memory_read.log | awk '{print $4}'
+      register: read_events_per_sec
+
+    - name: Extract Write Total Events
+      shell: grep "total number of events" /tmp/sysbench_memory_write.log | awk '{print $5}'
+      register: write_total_events
+
+    - name: Extract Write Events per Second
+      shell: grep "events per second" /tmp/sysbench_memory_write.log | awk '{print $4}'
+      register: write_events_per_sec
+
+    - name: Return Data as JSON
+      debug:
+        msg:
+          hostname: "{{ inventory_hostname }}"
+          cpu_cores: "{{ ansible_processor_vcpus }}"
+          memory_mb: "{{ ansible_memtotal_mb }}"
+          read_total_events: "{{ read_total_events.stdout }}"
+          read_events_per_sec: "{{ read_events_per_sec.stdout }}"
+          write_total_events: "{{ write_total_events.stdout }}"
+          write_events_per_sec: "{{ write_events_per_sec.stdout }}"
+"""
+
+# Save playbook to a temporary file
+with open("memory_benchmark.yml", "w") as f:
+    f.write(ANSIBLE_PLAYBOOK)
+
+# Run Ansible Playbook
+print("🚀 Running Memory Read/Write Benchmark on all servers...")
+process = subprocess.run(
+    ["ansible-playbook", "-i", "inventory", "memory_benchmark.yml"],
+    capture_output=True, text=True
+)
+
+# Extract JSON-like output from Ansible
+output_lines = process.stdout.splitlines()
+json_data = []
+for line in output_lines:
+    if '"hostname":' in line:  # Look for structured JSON output
+        try:
+            json_data.append(json.loads(line.strip().split("msg: ", 1)[1]))
+        except json.JSONDecodeError:
+            print(f"⚠️ Skipping malformed line: {line}")
+
+# Convert to DataFrame
+df = pd.DataFrame(json_data)
+
+# Convert numeric columns
+df["cpu_cores"] = df["cpu_cores"].astype(int)
+df["memory_mb"] = df["memory_mb"].astype(int)
+df["read_total_events"] = df["read_total_events"].astype(int)
+df["read_events_per_sec"] = df["read_events_per_sec"].astype(float)
+df["write_total_events"] = df["write_total_events"].astype(int)
+df["write_events_per_sec"] = df["write_events_per_sec"].astype(float)
+
+# Save to Excel (No Sorting)
+excel_file = "memory_read_write_benchmark.xlsx"
+df.to_excel(excel_file, index=False)
+
+# Print results
+print("\n✅ Benchmark completed. Results saved to", excel_file)
+print(df.to_string(index=False))
