@@ -1,0 +1,6 @@
+Processing benchmark results...
+Traceback (most recent call last):
+  File "/root/genral-python-scripts/benchmarking/membenchmark1/./membench3.py", line 70, in <module>
+    hostname = parts[0].split("=")[1]
+               ~~~~~~~~~~~~~~~~~~~^^^
+IndexError: list index out of range
