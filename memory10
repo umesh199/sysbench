@@ -1,0 +1,58 @@
+import os
+import re
+import pandas as pd
+import subprocess
+
+# Constants
+INVENTORY_FILE = "inventory.txt"
+RESULTS_DIR = "./results/"
+EXCEL_FILE = "sysbench_memory_results.xlsx"
+SYSBENCH_CMD = "sysbench memory --memory-block-size=4K --memory-total-size={}G --memory-oper={} --time=1800 run"
+
+# Step 1: Read inventory file
+with open(INVENTORY_FILE, "r") as f:
+    hosts = [line.strip() for line in f if line.strip()]
+
+# Step 2: Run sysbench memory benchmark on each host
+data = []
+
+for host in hosts:
+    print(f"Running sysbench memory benchmark on {host}...")
+    
+    # Get system memory size and CPU cores
+    memory_cmd = f"ssh {host} free -m | awk '/Mem:/ {{print $2}}'"
+    cores_cmd = f"ssh {host} nproc"
+    
+    memory_size = subprocess.run(memory_cmd, shell=True, capture_output=True, text=True).stdout.strip()
+    num_cores = subprocess.run(cores_cmd, shell=True, capture_output=True, text=True).stdout.strip()
+    
+    if not memory_size or not num_cores:
+        print(f"Failed to retrieve system info for {host}")
+        continue
+    
+    # Run sysbench memory read benchmark
+    read_cmd = f"ssh {host} {SYSBENCH_CMD.format(memory_size, 'read')}"
+    read_output = subprocess.run(read_cmd, shell=True, capture_output=True, text=True).stdout
+    
+    # Run sysbench memory write benchmark
+    write_cmd = f"ssh {host} {SYSBENCH_CMD.format(memory_size, 'write')}"
+    write_output = subprocess.run(write_cmd, shell=True, capture_output=True, text=True).stdout
+    
+    # Extract sysbench statistics
+    read_events_match = re.search(r"total number of events:\s*(\d+)", read_output)
+    read_events_per_sec_match = re.search(r"events per second:\s*([\d\.]+)", read_output)
+    write_events_match = re.search(r"total number of events:\s*(\d+)", write_output)
+    write_events_per_sec_match = re.search(r"events per second:\s*([\d\.]+)", write_output)
+    
+    read_total_events = read_events_match.group(1) if read_events_match else "N/A"
+    read_events_per_sec = read_events_per_sec_match.group(1) if read_events_per_sec_match else "N/A"
+    write_total_events = write_events_match.group(1) if write_events_match else "N/A"
+    write_events_per_sec = write_events_per_sec_match.group(1) if write_events_per_sec_match else "N/A"
+    
+    data.append([host, num_cores, memory_size, read_total_events, read_events_per_sec, write_total_events, write_events_per_sec])
+
+# Step 3: Save results to Excel
+df = pd.DataFrame(data, columns=["Hostname", "Cores", "Memory (MB)", "Read Total Events", "Read Events/sec", "Write Total Events", "Write Events/sec"])
+df.to_excel(EXCEL_FILE, index=False)
+
+print(f"✅ Results saved to {EXCEL_FILE}")
