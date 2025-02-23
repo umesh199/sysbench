@@ -1,0 +1,91 @@
+import json
+import pandas as pd
+import subprocess
+import os
+
+# Define the Ansible Playbook as a string
+ansible_playbook = """---
+- name: Run Memory Benchmark on Multiple Servers
+  hosts: all
+  gather_facts: yes
+  tasks:
+    - name: Install sysbench (if not installed)
+      package:
+        name: sysbench
+        state: present
+
+    - name: Calculate Memory Allocation
+      shell: |
+        free -g | awk '/Mem:/ {print $2*5"G"}'
+      register: memory_alloc
+
+    - name: Run Memory Benchmark (30 min)
+      shell: |
+        sysbench memory --memory-block-size=4K \\
+        --memory-total-size={{ memory_alloc.stdout }} \\
+        --time=1800 --threads={{ ansible_processor_vcpus }} run | tee /tmp/sysbench_memory.log
+      register: sysbench_output
+
+    - name: Extract Total Events
+      shell: |
+        grep "total number of events" /tmp/sysbench_memory.log | awk '{print $5}'
+      register: total_events
+
+    - name: Extract Events per Second
+      shell: |
+        grep "events per second" /tmp/sysbench_memory.log | awk '{print $4}'
+      register: events_per_second
+
+    - name: Return Data to Controller
+      debug:
+        msg: "Hostname={{ inventory_hostname }} Cores={{ ansible_processor_vcpus }} Memory={{ ansible_memtotal_mb }}MB Total Events={{ total_events.stdout }} Events/sec={{ events_per_second.stdout }}"
+"""
+
+# Save the playbook to a temporary file
+playbook_file = "memory_benchmark.yml"
+with open(playbook_file, "w") as file:
+    file.write(ansible_playbook)
+
+print("✅ Ansible playbook written to memory_benchmark.yml")
+
+# Run the Ansible Playbook with live output
+print("🚀 Running Memory benchmark on all servers...")
+process = subprocess.Popen(["ansible-playbook", "-i", "inventory", playbook_file], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+# Live output display
+for line in iter(process.stdout.readline, ''):
+    print(line, end='')  # Show Ansible output in real-time
+
+process.stdout.close()
+process.wait()
+
+# Parse Ansible JSON Output
+print("\n📊 Processing benchmark results...")
+data = []
+with open(playbook_file, "r") as f:
+    for line in f:
+        if "Hostname=" in line:
+            parts = line.split()
+            hostname = parts[0].split("=")[1]
+            cores = int(parts[1].split("=")[1])
+            memory = int(parts[2].split("=")[1].replace("MB", ""))
+            total_events = int(parts[3].split("=")[1])
+            events_per_sec = float(parts[4].split("=")[1])
+            data.append({"Hostname": hostname, "CPU Cores": cores, "Memory (MB)": memory, "Total Events": total_events, "Events/sec": events_per_sec})
+
+# Convert to DataFrame
+df = pd.DataFrame(data)
+
+# Sort by Best Performance (Total Events)
+df = df.sort_values(by="Total Events", ascending=False)
+
+# Save to Excel
+excel_file = "memory_benchmark_results.xlsx"
+df.to_excel(excel_file, index=False)
+
+# Clean up temporary playbook file
+os.remove(playbook_file)
+
+# Print final summary
+print("\n✅ Benchmark completed. Results saved to", excel_file)
+print(df.to_string(index=False))  # Show results in console
